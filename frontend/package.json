@@ -1,0 +1,43 @@
+{
+  "name": "smart-refresh",
+  "version": "1.0.0",
+  "description": "SmartRefresh Decky Loader plugin frontend",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "shx rm -rf dist && rollup -c",
+    "watch": "rollup -c -w"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/smart-refresh"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^25.0.7",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-replace": "^5.0.5",
+    "@rollup/plugin-typescript": "^11.1.6",
+    "@types/react": "18.2.0",
+    "@types/react-dom": "18.2.0",
+    "rollup": "^4.9.6",
+    "rollup-plugin-import-assets": "^1.1.1",
+    "shx": "^0.3.4",
+    "tslib": "^2.6.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@decky/api": "^1.1.2",
+    "@decky/ui": "^4.7.2",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "pnpm": {
+    "peerDependencyRules": {
+      "ignoreMissing": [
+        "react",
+        "react-dom"
+      ]
+    }
+  }
+}
