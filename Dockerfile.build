@@ -1,0 +1,31 @@
+# SmartRefresh Build Dockerfile
+# Based on Arch Linux to match SteamOS environment
+# Usage: docker build -f Dockerfile.build -t smartrefresh-builder . && docker run --rm -v $(pwd)/dist:/output smartrefresh-builder
+
+FROM archlinux:base-devel
+
+# Update system and install dependencies
+RUN pacman -Syu --noconfirm && \
+    pacman -S --noconfirm \
+        rust \
+        cargo \
+        nodejs \
+        npm \
+        zip \
+        git \
+        && pacman -Scc --noconfirm
+
+# Install pnpm globally
+RUN npm install -g pnpm
+
+# Set up working directory
+WORKDIR /build
+
+# Copy project files
+COPY . .
+
+# Build script
+RUN chmod +x /build/docker-build.sh
+
+# Default command runs the build
+CMD ["/build/docker-build.sh"]

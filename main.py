@@ -208,3 +208,31 @@ class Plugin:
     async def stop(self) -> Dict[str, Any]:
         """Stop the refresh rate control loop."""
         return self._send_ipc_command({"command": "Stop"})
+    
+    # Aliases for frontend compatibility
+    async def start_daemon(self) -> Dict[str, Any]:
+        """Alias for start() - used by frontend."""
+        return await self.start()
+    
+    async def stop_daemon(self) -> Dict[str, Any]:
+        """Alias for stop() - used by frontend."""
+        return await self.stop()
+    
+    async def set_enabled(self, enabled: bool) -> Dict[str, Any]:
+        """Enable or disable the refresh rate control."""
+        if enabled:
+            return await self.start()
+        else:
+            return await self.stop()
+    
+    async def set_range(self, min_hz: int, max_hz: int) -> Dict[str, Any]:
+        """Set the refresh rate range."""
+        # Get current settings first to preserve sensitivity
+        status = self._send_ipc_command({"command": "GetStatus"})
+        sensitivity = status.get("config", {}).get("sensitivity", "balanced")
+        return self._send_ipc_command({
+            "command": "SetConfig",
+            "min_hz": min_hz,
+            "max_hz": max_hz,
+            "sensitivity": sensitivity
+        })
