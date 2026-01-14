@@ -1,4 +1,4 @@
-//! Error types for the SmartRefresh daemon.
+//! Error types for the SmartRefresh daemon v2.0.
 //!
 //! This module defines custom error enums for each component of the daemon,
 //! providing descriptive error messages with context information.
@@ -23,6 +23,19 @@ pub enum ShmError {
 
     #[error("Shared memory segment not available, MangoHud may not be running")]
     NotAvailable,
+}
+
+/// Errors related to profile management.
+#[derive(Error, Debug)]
+pub enum ProfileError {
+    #[error("Failed to load profiles: {0}")]
+    LoadFailed(String),
+
+    #[error("Failed to save profiles: {0}")]
+    SaveFailed(String),
+
+    #[error("Profile not found for app_id: {0}")]
+    NotFound(String),
 }
 
 /// Errors related to display control operations.

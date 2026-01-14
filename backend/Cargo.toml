@@ -1,6 +1,6 @@
 [package]
 name = "smart-refresh-daemon"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
 description = "SmartRefresh daemon for dynamic refresh rate switching on Steam Deck"
 authors = ["SmartRefresh Team"]
@@ -24,6 +24,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "time"] }
 time = { version = "0.3", features = ["formatting"] }
 tracing-appender = "0.2"
+
+# D-Bus for suspend/resume handling
+zbus = { version = "4.0", default-features = false, features = ["tokio"] }
+
+# Directories for config paths
+dirs = "5.0"
 
 [dev-dependencies]
 # Property-based testing

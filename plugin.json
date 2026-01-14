@@ -1,12 +1,12 @@
 {
   "name": "SmartRefresh",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "author": "SmartRefresh Team",
   "flags": ["root"],
   "api_version": 1,
   "publish": {
-    "tags": ["utility", "performance", "display"],
-    "description": "Dynamic refresh rate switching (Software VRR) based on real-time FPS metrics from MangoHud",
+    "tags": ["utility", "performance", "display", "battery", "vrr"],
+    "description": "Dynamic refresh rate switching (Software VRR) with per-game profiles, battery tracking, and adaptive sensitivity",
     "image": "https://raw.githubusercontent.com/your-username/smart-refresh/main/assets/icon.png"
   }
 }

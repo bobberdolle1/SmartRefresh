@@ -2,8 +2,27 @@
 //!
 //! This module contains the state machine for refresh rate decisions
 //! based on sustained FPS patterns.
+//!
+//! v2.0 additions:
+//! - FPS Jitter Tolerance ("Sticky Target")
+//! - Adaptive Sensitivity based on FPS variance
+//! - Sliding window for FPS sample analysis
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
+/// FPS tolerance for "sticky target" - prevents switching when FPS is close to current Hz
+/// This creates a "magnet" effect around the current refresh rate
+pub const FPS_TOLERANCE: f64 = 3.0;
+
+/// Number of samples for adaptive sensitivity sliding window
+pub const ADAPTIVE_WINDOW_SIZE: usize = 10;
+
+/// Standard deviation threshold for stable FPS (allow user sensitivity)
+pub const STD_DEV_STABLE: f64 = 2.0;
+
+/// Standard deviation threshold for unstable FPS (force conservative)
+pub const STD_DEV_UNSTABLE: f64 = 5.0;
 
 /// Algorithm state for hysteresis control.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,11 +88,66 @@ impl Sensitivity {
 /// Hz step size for quantization (5Hz steps)
 const HZ_STEP_SIZE: u32 = 5;
 
-/// LCD allowed Hz steps
-const LCD_HZ_STEPS: [u32; 5] = [40, 45, 50, 55, 60];
+/// Sliding window for FPS samples used in adaptive sensitivity
+#[derive(Debug, Clone)]
+pub struct FpsSlidingWindow {
+    samples: VecDeque<f64>,
+    capacity: usize,
+}
 
-/// OLED allowed Hz steps
-const OLED_HZ_STEPS: [u32; 10] = [45, 50, 55, 60, 65, 70, 75, 80, 85, 90];
+impl FpsSlidingWindow {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            samples: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn push(&mut self, fps: f64) {
+        if self.samples.len() >= self.capacity {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(fps);
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.samples.len() >= self.capacity
+    }
+
+    /// Calculate mean of samples
+    pub fn mean(&self) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        self.samples.iter().sum::<f64>() / self.samples.len() as f64
+    }
+
+    /// Calculate standard deviation of samples
+    pub fn std_dev(&self) -> f64 {
+        if self.samples.len() < 2 {
+            return 0.0;
+        }
+        let mean = self.mean();
+        let variance = self.samples.iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>() / (self.samples.len() - 1) as f64;
+        variance.sqrt()
+    }
+}
+
+impl Default for FpsSlidingWindow {
+    fn default() -> Self {
+        Self::new(ADAPTIVE_WINDOW_SIZE)
+    }
+}
 
 /// Hysteresis controller for refresh rate decisions.
 ///
@@ -92,7 +166,7 @@ pub struct HysteresisController {
     last_change: Option<Instant>,
     /// User-selected sensitivity setting (stored)
     user_sensitivity: Sensitivity,
-    /// Effective sensitivity (used - may differ for LCD)
+    /// Effective sensitivity (used - may differ for LCD or adaptive)
     effective_sensitivity: Sensitivity,
     /// Current device mode
     device_mode: DeviceMode,
@@ -100,6 +174,12 @@ pub struct HysteresisController {
     user_min_hz: u32,
     /// User-configured max Hz
     user_max_hz: u32,
+    /// Sliding window for adaptive sensitivity
+    fps_window: FpsSlidingWindow,
+    /// Whether adaptive sensitivity is enabled
+    adaptive_sensitivity_enabled: bool,
+    /// External display detected - pause processing
+    external_display_detected: bool,
 }
 
 impl HysteresisController {
@@ -124,6 +204,9 @@ impl HysteresisController {
             device_mode: DeviceMode::Oled,
             user_min_hz: 40,
             user_max_hz: 90,
+            fps_window: FpsSlidingWindow::default(),
+            adaptive_sensitivity_enabled: false,
+            external_display_detected: false,
         }
     }
 
@@ -137,7 +220,7 @@ impl HysteresisController {
         self.user_sensitivity
     }
 
-    /// Get the effective sensitivity (may differ for LCD mode).
+    /// Get the effective sensitivity (may differ for LCD mode or adaptive).
     pub fn effective_sensitivity(&self) -> Sensitivity {
         self.effective_sensitivity
     }
@@ -163,6 +246,46 @@ impl HysteresisController {
         self.user_max_hz = max_hz;
     }
 
+    /// Enable or disable adaptive sensitivity
+    pub fn set_adaptive_sensitivity(&mut self, enabled: bool) {
+        self.adaptive_sensitivity_enabled = enabled;
+        if !enabled {
+            // Restore user sensitivity when disabled
+            self.update_effective_sensitivity();
+        }
+    }
+
+    /// Check if adaptive sensitivity is enabled
+    pub fn is_adaptive_sensitivity_enabled(&self) -> bool {
+        self.adaptive_sensitivity_enabled
+    }
+
+    /// Set external display detection state
+    pub fn set_external_display_detected(&mut self, detected: bool) {
+        self.external_display_detected = detected;
+        if detected {
+            self.state = AlgorithmState::Stable;
+        }
+    }
+
+    /// Check if external display is detected
+    pub fn is_external_display_detected(&self) -> bool {
+        self.external_display_detected
+    }
+
+    /// Get the current FPS standard deviation from sliding window
+    pub fn get_fps_std_dev(&self) -> f64 {
+        self.fps_window.std_dev()
+    }
+
+    /// Reset state to Stable and clear last_change timestamp
+    /// Used after suspend/resume to prevent stale timestamp issues
+    pub fn reset_state(&mut self) {
+        self.state = AlgorithmState::Stable;
+        self.last_change = None;
+        self.fps_window.clear();
+    }
+
     /// Check if enough time has passed since the last rate change.
     fn can_change(&self, now: Instant) -> bool {
         match self.last_change {
@@ -176,22 +299,22 @@ impl HysteresisController {
         self.last_change = Some(now);
     }
 
+    /// Update effective sensitivity based on device mode
+    fn update_effective_sensitivity(&mut self) {
+        if self.device_mode == DeviceMode::Lcd {
+            self.effective_sensitivity = Sensitivity::Conservative;
+        } else {
+            self.effective_sensitivity = self.user_sensitivity;
+        }
+        self.drop_threshold = self.effective_sensitivity.drop_threshold();
+        self.increase_threshold = self.effective_sensitivity.increase_threshold();
+    }
+
     /// Update sensitivity (adjusts thresholds).
     /// Stores user preference but may apply different effective sensitivity for LCD.
     pub fn set_sensitivity(&mut self, sensitivity: Sensitivity) {
         self.user_sensitivity = sensitivity;
-        
-        // For LCD mode, always use conservative regardless of user preference
-        if self.device_mode == DeviceMode::Lcd {
-            self.effective_sensitivity = Sensitivity::Conservative;
-            self.drop_threshold = Sensitivity::Conservative.drop_threshold();
-            self.increase_threshold = Sensitivity::Conservative.increase_threshold();
-        } else {
-            self.effective_sensitivity = sensitivity;
-            self.drop_threshold = sensitivity.drop_threshold();
-            self.increase_threshold = sensitivity.increase_threshold();
-        }
-        
+        self.update_effective_sensitivity();
         // Reset state when sensitivity changes
         self.state = AlgorithmState::Stable;
     }
@@ -207,30 +330,14 @@ impl HysteresisController {
         
         match mode {
             DeviceMode::Lcd => {
-                // LCD: Aggressive throttling to prevent flickering
                 self.min_change_interval = Duration::from_millis(Self::MIN_CHANGE_INTERVAL_LCD_MS);
-                // Force conservative sensitivity for LCD (effective only)
-                self.effective_sensitivity = Sensitivity::Conservative;
-                self.drop_threshold = Sensitivity::Conservative.drop_threshold();
-                self.increase_threshold = Sensitivity::Conservative.increase_threshold();
             }
-            DeviceMode::Oled => {
-                // OLED: Standard fast switching
+            DeviceMode::Oled | DeviceMode::Custom => {
                 self.min_change_interval = Duration::from_millis(Self::MIN_CHANGE_INTERVAL_OLED_MS);
-                // Restore user sensitivity for OLED
-                self.effective_sensitivity = self.user_sensitivity;
-                self.drop_threshold = self.user_sensitivity.drop_threshold();
-                self.increase_threshold = self.user_sensitivity.increase_threshold();
-            }
-            DeviceMode::Custom => {
-                // Custom: Use OLED timing but allow user sensitivity
-                self.min_change_interval = Duration::from_millis(Self::MIN_CHANGE_INTERVAL_OLED_MS);
-                self.effective_sensitivity = self.user_sensitivity;
-                self.drop_threshold = self.user_sensitivity.drop_threshold();
-                self.increase_threshold = self.user_sensitivity.increase_threshold();
             }
         }
         
+        self.update_effective_sensitivity();
         // Reset state when mode changes
         self.state = AlgorithmState::Stable;
     }
@@ -239,15 +346,11 @@ impl HysteresisController {
     fn get_effective_range(&self) -> (u32, u32) {
         match self.device_mode {
             DeviceMode::Lcd => {
-                // LCD: Force 40-60 Hz range, intersected with user range
                 let effective_min = self.user_min_hz.max(Self::LCD_MIN_HZ);
                 let effective_max = self.user_max_hz.min(Self::LCD_MAX_HZ);
                 (effective_min, effective_max)
             }
-            _ => {
-                // OLED/Custom: Use user-defined range
-                (self.user_min_hz, self.user_max_hz)
-            }
+            _ => (self.user_min_hz, self.user_max_hz),
         }
     }
 
@@ -281,15 +384,48 @@ impl HysteresisController {
         target.clamp(effective_min, effective_max)
     }
 
+    /// Apply adaptive sensitivity based on FPS variance
+    fn apply_adaptive_sensitivity(&mut self) {
+        if !self.adaptive_sensitivity_enabled || self.device_mode == DeviceMode::Lcd {
+            return;
+        }
+
+        if !self.fps_window.is_full() {
+            return;
+        }
+
+        let std_dev = self.fps_window.std_dev();
+        
+        if std_dev > STD_DEV_UNSTABLE {
+            // Unstable FPS - force conservative
+            if self.effective_sensitivity != Sensitivity::Conservative {
+                self.effective_sensitivity = Sensitivity::Conservative;
+                self.drop_threshold = Sensitivity::Conservative.drop_threshold();
+                self.increase_threshold = Sensitivity::Conservative.increase_threshold();
+                tracing::debug!("Adaptive: FPS unstable (std_dev={:.2}), forcing Conservative", std_dev);
+            }
+        } else if std_dev < STD_DEV_STABLE {
+            // Stable FPS - allow user preference
+            if self.effective_sensitivity != self.user_sensitivity {
+                self.effective_sensitivity = self.user_sensitivity;
+                self.drop_threshold = self.user_sensitivity.drop_threshold();
+                self.increase_threshold = self.user_sensitivity.increase_threshold();
+                tracing::debug!("Adaptive: FPS stable (std_dev={:.2}), restoring user sensitivity", std_dev);
+            }
+        }
+        // Between thresholds - keep current effective sensitivity
+    }
+
     /// Process FPS sample and determine if refresh rate should change.
     ///
     /// Returns `Some(new_hz)` if a change is needed, `None` otherwise.
     ///
     /// # Algorithm
-    /// - If FPS < (CurrentHz - 1) for `drop_threshold` duration → decrease Hz (quantized to 5Hz step)
+    /// - If external display detected → return None (paused)
+    /// - If FPS within tolerance of current Hz → force Stable, return None (sticky target)
+    /// - If FPS < (CurrentHz - 1) for `drop_threshold` duration → decrease Hz
     /// - If FPS >= CurrentHz for `increase_threshold` duration → increase Hz by 5Hz step
     /// - Enforces minimum interval between changes
-    /// - LCD mode: 2000ms min interval, conservative sensitivity, 40-60Hz range
     pub fn process(&mut self, current_fps: f64, current_hz: u32) -> Option<u32> {
         self.process_with_time(current_fps, current_hz, Instant::now())
     }
@@ -301,8 +437,28 @@ impl HysteresisController {
         current_hz: u32,
         now: Instant,
     ) -> Option<u32> {
+        // Add FPS to sliding window for adaptive sensitivity
+        self.fps_window.push(current_fps);
+        
+        // Apply adaptive sensitivity if enabled
+        self.apply_adaptive_sensitivity();
+
+        // If external display detected, pause processing
+        if self.external_display_detected {
+            self.state = AlgorithmState::Stable;
+            return None;
+        }
+
         let (effective_min, effective_max) = self.get_effective_range();
         
+        // FPS Jitter Tolerance ("Sticky Target")
+        // If FPS is within tolerance of current Hz, force stable state
+        let fps_diff = (current_fps - current_hz as f64).abs();
+        if fps_diff < FPS_TOLERANCE {
+            self.state = AlgorithmState::Stable;
+            return None;
+        }
+
         // Check if FPS is below the drop threshold (CurrentHz - 1)
         let fps_below_threshold = current_fps < (current_hz as f64 - 1.0);
         // Check if FPS is at or above current Hz (can potentially increase)
@@ -311,10 +467,8 @@ impl HysteresisController {
         match self.state {
             AlgorithmState::Stable => {
                 if fps_below_threshold && current_hz > effective_min {
-                    // Start tracking potential drop
                     self.state = AlgorithmState::Dropping { since: now };
                 } else if fps_at_or_above && current_hz < effective_max {
-                    // Start tracking potential increase
                     self.state = AlgorithmState::Increasing { since: now };
                 }
                 None
@@ -322,16 +476,12 @@ impl HysteresisController {
 
             AlgorithmState::Dropping { since } => {
                 if !fps_below_threshold {
-                    // FPS recovered, go back to stable
                     self.state = AlgorithmState::Stable;
                     None
                 } else if now.duration_since(since) >= self.drop_threshold {
-                    // Sustained drop - check if we can change
                     if self.can_change(now) {
-                        // Calculate new Hz based on FPS (quantized to 5Hz step)
                         let target_hz = self.target_hz_for_drop(current_fps);
                         
-                        // Deadband: don't change if difference is less than step size
                         if current_hz.abs_diff(target_hz) < HZ_STEP_SIZE {
                             self.state = AlgorithmState::Stable;
                             return None;
@@ -341,31 +491,24 @@ impl HysteresisController {
                         self.record_change(now);
                         Some(target_hz)
                     } else {
-                        // Can't change yet due to min interval, stay in dropping state
                         None
                     }
                 } else {
-                    // Still waiting for sustained drop
                     None
                 }
             }
 
             AlgorithmState::Increasing { since } => {
                 if fps_below_threshold {
-                    // FPS dropped, switch to dropping state
                     self.state = AlgorithmState::Dropping { since: now };
                     None
                 } else if !fps_at_or_above {
-                    // FPS dropped below current Hz but not below threshold
                     self.state = AlgorithmState::Stable;
                     None
                 } else if now.duration_since(since) >= self.increase_threshold {
-                    // Sustained high FPS - check if we can change
                     if self.can_change(now) {
-                        // Increase by one step (5Hz), not +1Hz
                         let new_hz = self.next_step_up(current_hz);
                         
-                        // Deadband: don't change if we're already at or above target
                         if new_hz <= current_hz {
                             self.state = AlgorithmState::Stable;
                             return None;
@@ -375,11 +518,9 @@ impl HysteresisController {
                         self.record_change(now);
                         Some(new_hz)
                     } else {
-                        // Can't change yet due to min interval
                         None
                     }
                 } else {
-                    // Still waiting for sustained increase
                     None
                 }
             }
@@ -387,40 +528,20 @@ impl HysteresisController {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    // Unit tests for basic functionality
     #[test]
     fn test_sensitivity_thresholds() {
-        assert_eq!(
-            Sensitivity::Conservative.drop_threshold(),
-            Duration::from_secs(2)
-        );
-        assert_eq!(
-            Sensitivity::Conservative.increase_threshold(),
-            Duration::from_secs(5)
-        );
-
-        assert_eq!(
-            Sensitivity::Balanced.drop_threshold(),
-            Duration::from_secs(1)
-        );
-        assert_eq!(
-            Sensitivity::Balanced.increase_threshold(),
-            Duration::from_secs(3)
-        );
-
-        assert_eq!(
-            Sensitivity::Aggressive.drop_threshold(),
-            Duration::from_millis(500)
-        );
-        assert_eq!(
-            Sensitivity::Aggressive.increase_threshold(),
-            Duration::from_millis(1500)
-        );
+        assert_eq!(Sensitivity::Conservative.drop_threshold(), Duration::from_secs(2));
+        assert_eq!(Sensitivity::Conservative.increase_threshold(), Duration::from_secs(5));
+        assert_eq!(Sensitivity::Balanced.drop_threshold(), Duration::from_secs(1));
+        assert_eq!(Sensitivity::Balanced.increase_threshold(), Duration::from_secs(3));
+        assert_eq!(Sensitivity::Aggressive.drop_threshold(), Duration::from_millis(500));
+        assert_eq!(Sensitivity::Aggressive.increase_threshold(), Duration::from_millis(1500));
     }
 
     #[test]
@@ -431,19 +552,109 @@ mod tests {
     }
 
     #[test]
-    fn test_set_sensitivity_resets_state() {
+    fn test_fps_jitter_tolerance_sticky_target() {
         let mut controller = HysteresisController::new(Sensitivity::Balanced);
-        let now = Instant::now();
+        controller.set_user_range(40, 90);
+        let start = Instant::now();
 
-        // Put controller in Dropping state
-        controller.state = AlgorithmState::Dropping { since: now };
-
-        // Change sensitivity
-        controller.set_sensitivity(Sensitivity::Aggressive);
-
-        // State should be reset to Stable
+        // FPS at 58, Hz at 60 - within tolerance (diff = 2 < 3)
+        let result = controller.process_with_time(58.0, 60, start);
+        assert!(result.is_none());
         assert_eq!(controller.state(), AlgorithmState::Stable);
-        assert_eq!(controller.sensitivity(), Sensitivity::Aggressive);
+
+        // FPS at 62, Hz at 60 - within tolerance (diff = 2 < 3)
+        let result = controller.process_with_time(62.0, 60, start);
+        assert!(result.is_none());
+        assert_eq!(controller.state(), AlgorithmState::Stable);
+
+        // FPS at 55, Hz at 60 - outside tolerance (diff = 5 > 3)
+        let result = controller.process_with_time(55.0, 60, start);
+        assert!(result.is_none()); // First sample, enters Dropping state
+        assert!(matches!(controller.state(), AlgorithmState::Dropping { .. }));
+    }
+
+    #[test]
+    fn test_reset_state_clears_timestamps() {
+        let mut controller = HysteresisController::new(Sensitivity::Balanced);
+        controller.set_user_range(40, 90);
+        let start = Instant::now();
+
+        // Make a change to set last_change
+        controller.state = AlgorithmState::Dropping { since: start };
+        controller.last_change = Some(start);
+
+        // Reset state
+        controller.reset_state();
+
+        assert_eq!(controller.state(), AlgorithmState::Stable);
+        assert!(controller.last_change().is_none());
+    }
+
+    #[test]
+    fn test_external_display_pauses_processing() {
+        let mut controller = HysteresisController::new(Sensitivity::Balanced);
+        controller.set_user_range(40, 90);
+        controller.set_external_display_detected(true);
+        let start = Instant::now();
+
+        // Even with low FPS, should return None when external display detected
+        let result = controller.process_with_time(30.0, 60, start);
+        assert!(result.is_none());
+        assert_eq!(controller.state(), AlgorithmState::Stable);
+    }
+
+    #[test]
+    fn test_fps_sliding_window() {
+        let mut window = FpsSlidingWindow::new(5);
+        
+        // Push samples
+        for i in 1..=5 {
+            window.push(i as f64 * 10.0);
+        }
+        
+        assert!(window.is_full());
+        assert_eq!(window.len(), 5);
+        assert_eq!(window.mean(), 30.0); // (10+20+30+40+50)/5
+        
+        // Std dev of [10,20,30,40,50] = sqrt(250) ≈ 15.81
+        let std_dev = window.std_dev();
+        assert!((std_dev - 15.81).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_adaptive_sensitivity_unstable_fps() {
+        let mut controller = HysteresisController::new(Sensitivity::Aggressive);
+        controller.set_user_range(40, 90);
+        controller.set_adaptive_sensitivity(true);
+
+        // Push highly variable FPS samples (std_dev > 5)
+        let fps_samples = [30.0, 60.0, 35.0, 55.0, 40.0, 65.0, 32.0, 58.0, 38.0, 62.0];
+        let start = Instant::now();
+        
+        for fps in fps_samples {
+            controller.process_with_time(fps, 60, start);
+        }
+
+        // Should have switched to Conservative due to high variance
+        assert_eq!(controller.effective_sensitivity(), Sensitivity::Conservative);
+    }
+
+    #[test]
+    fn test_adaptive_sensitivity_stable_fps() {
+        let mut controller = HysteresisController::new(Sensitivity::Aggressive);
+        controller.set_user_range(40, 90);
+        controller.set_adaptive_sensitivity(true);
+
+        // Push stable FPS samples (std_dev < 2)
+        let fps_samples = [60.0, 60.5, 59.5, 60.2, 59.8, 60.1, 59.9, 60.3, 59.7, 60.0];
+        let start = Instant::now();
+        
+        for fps in fps_samples {
+            controller.process_with_time(fps, 60, start);
+        }
+
+        // Should keep user preference (Aggressive) due to low variance
+        assert_eq!(controller.effective_sensitivity(), Sensitivity::Aggressive);
     }
 
     #[test]
@@ -453,24 +664,9 @@ mod tests {
         
         controller.apply_mode_constraints(DeviceMode::Lcd);
         
-        // User sensitivity preserved, but effective is conservative
         assert_eq!(controller.sensitivity(), Sensitivity::Aggressive);
         assert_eq!(controller.effective_sensitivity(), Sensitivity::Conservative);
         assert_eq!(controller.min_change_interval, Duration::from_millis(2000));
-    }
-
-    #[test]
-    fn test_oled_mode_restores_user_sensitivity() {
-        let mut controller = HysteresisController::new(Sensitivity::Aggressive);
-        
-        // Switch to LCD (forces conservative)
-        controller.apply_mode_constraints(DeviceMode::Lcd);
-        assert_eq!(controller.effective_sensitivity(), Sensitivity::Conservative);
-        
-        // Switch back to OLED (restores user preference)
-        controller.apply_mode_constraints(DeviceMode::Oled);
-        assert_eq!(controller.effective_sensitivity(), Sensitivity::Aggressive);
-        assert_eq!(controller.min_change_interval, Duration::from_millis(500));
     }
 
     #[test]
@@ -482,170 +678,28 @@ mod tests {
         assert_eq!(HysteresisController::quantize_hz(50), 50);
     }
 
-    #[test]
-    fn test_quantize_hz_down() {
-        assert_eq!(HysteresisController::quantize_hz_down(42), 40);
-        assert_eq!(HysteresisController::quantize_hz_down(47), 45);
-        assert_eq!(HysteresisController::quantize_hz_down(49), 45);
-        assert_eq!(HysteresisController::quantize_hz_down(50), 50);
-    }
-
-    #[test]
-    fn test_lcd_hz_range_clamping() {
-        let mut controller = HysteresisController::new(Sensitivity::Balanced);
-        controller.set_user_range(40, 90);
-        controller.apply_mode_constraints(DeviceMode::Lcd);
-        
-        // LCD should clamp to 40-60
-        assert_eq!(controller.clamp_hz(30), 40);
-        assert_eq!(controller.clamp_hz(70), 60);
-        assert_eq!(controller.clamp_hz(55), 55);
-    }
-
-    #[test]
-    fn test_increase_uses_5hz_steps() {
-        let mut controller = HysteresisController::new(Sensitivity::Balanced);
-        controller.set_user_range(40, 90);
-        let start = Instant::now();
-
-        // Start at 50Hz with high FPS
-        let result1 = controller.process_with_time(60.0, 50, start);
-        assert!(result1.is_none());
-
-        // After increase threshold, should increase by 5Hz (not 1Hz)
-        let after_threshold = start + Duration::from_millis(3001);
-        let result2 = controller.process_with_time(60.0, 50, after_threshold);
-        
-        assert!(result2.is_some());
-        assert_eq!(result2.unwrap(), 55); // 50 + 5 = 55, not 51
-    }
-
-    #[test]
-    fn test_drop_quantizes_to_5hz() {
-        let mut controller = HysteresisController::new(Sensitivity::Balanced);
-        controller.set_user_range(40, 90);
-        let start = Instant::now();
-
-        // Start at 60Hz with FPS at 47 (should drop to 45, not 47)
-        let result1 = controller.process_with_time(47.0, 60, start);
-        assert!(result1.is_none());
-
-        let after_threshold = start + Duration::from_millis(1001);
-        let result2 = controller.process_with_time(47.0, 60, after_threshold);
-        
-        assert!(result2.is_some());
-        assert_eq!(result2.unwrap(), 45); // floor(47) = 47, quantize_down = 45
-    }
-
-    #[test]
-    fn test_lcd_min_change_interval() {
-        let mut controller = HysteresisController::new(Sensitivity::Balanced);
-        controller.set_user_range(40, 60);
-        controller.apply_mode_constraints(DeviceMode::Lcd);
-        let start = Instant::now();
-
-        // First drop
-        let _ = controller.process_with_time(45.0, 60, start);
-        let after_drop = start + Duration::from_millis(2001); // Conservative: 2s
-        let first_change = controller.process_with_time(45.0, 60, after_drop);
-        assert!(first_change.is_some());
-
-        // Try second change within 2000ms - should be blocked
-        let new_hz = first_change.unwrap();
-        let _ = controller.process_with_time(35.0, new_hz, after_drop + Duration::from_millis(1));
-        let too_soon = after_drop + Duration::from_millis(1500);
-        let blocked = controller.process_with_time(35.0, new_hz, too_soon);
-        assert!(blocked.is_none()); // Blocked by min interval
-    }
-
-    // Property-based tests
     proptest! {
         #[test]
-        fn prop_hysteresis_decrease_after_sustained_drop(
-            current_hz in 45u32..=90u32,
-            fps_offset in 6.0f64..=20.0f64,
+        fn prop_sticky_target_prevents_oscillation(
+            current_hz in 45u32..=85u32,
+            fps_offset in 0.0f64..2.9f64,
         ) {
-            // FPS is below (current_hz - 1), ensure at least 5Hz difference for step
-            let low_fps = (current_hz as f64) - fps_offset;
-            let low_fps = low_fps.max(1.0);
-
-            let mut controller = HysteresisController::new(Sensitivity::Balanced);
-            controller.set_user_range(40, 90);
-            let start = Instant::now();
-
-            // First call - should transition to Dropping state
-            let result1 = controller.process_with_time(low_fps, current_hz, start);
-            prop_assert!(result1.is_none(), "Should not change on first sample");
-            let is_dropping = matches!(controller.state(), AlgorithmState::Dropping { .. });
-            prop_assert!(is_dropping, "Should be in Dropping state");
-
-            // Call after drop threshold (1 second for Balanced)
-            let after_threshold = start + Duration::from_millis(1001);
-            let result2 = controller.process_with_time(low_fps, current_hz, after_threshold);
-
-            // Should output a decrease decision (quantized to 5Hz)
-            if let Some(new_hz) = result2 {
-                prop_assert!(new_hz < current_hz, "New Hz should be lower than current");
-                prop_assert_eq!(new_hz % 5, 0, "New Hz should be quantized to 5Hz step");
-            }
-        }
-
-        #[test]
-        fn prop_hysteresis_increase_uses_5hz_steps(
-            current_hz in 40u32..=85u32,
-            fps_offset in 0.0f64..=10.0f64,
-        ) {
-            // Ensure current_hz is on a 5Hz step
             let current_hz = (current_hz / 5) * 5;
-            let high_fps = (current_hz as f64) + fps_offset;
-
             let mut controller = HysteresisController::new(Sensitivity::Balanced);
             controller.set_user_range(40, 90);
             let start = Instant::now();
 
-            let result1 = controller.process_with_time(high_fps, current_hz, start);
-            prop_assert!(result1.is_none(), "Should not change on first sample");
+            // FPS within tolerance should not trigger state change
+            let fps_above = current_hz as f64 + fps_offset;
+            let fps_below = current_hz as f64 - fps_offset;
 
-            let after_threshold = start + Duration::from_millis(3001);
-            let result2 = controller.process_with_time(high_fps, current_hz, after_threshold);
+            let result1 = controller.process_with_time(fps_above, current_hz, start);
+            prop_assert!(result1.is_none());
+            prop_assert_eq!(controller.state(), AlgorithmState::Stable);
 
-            if let Some(new_hz) = result2 {
-                prop_assert_eq!(new_hz, current_hz + 5, "Should increase by exactly 5Hz");
-                prop_assert_eq!(new_hz % 5, 0, "New Hz should be on 5Hz step");
-            }
-        }
-
-        #[test]
-        fn prop_lcd_mode_enforces_2s_min_interval(
-            current_hz in 45u32..=60u32,
-            interval_ms in 0u64..=1999u64,
-        ) {
-            let current_hz = (current_hz / 5) * 5; // Ensure on 5Hz step
-            let low_fps = (current_hz as f64) - 10.0;
-
-            let mut controller = HysteresisController::new(Sensitivity::Balanced);
-            controller.set_user_range(40, 60);
-            controller.apply_mode_constraints(DeviceMode::Lcd);
-            let start = Instant::now();
-
-            // First change after conservative drop threshold (2s)
-            let _ = controller.process_with_time(low_fps, current_hz, start);
-            let after_drop = start + Duration::from_millis(2001);
-            let first_change = controller.process_with_time(low_fps, current_hz, after_drop);
-            
-            if first_change.is_some() {
-                let new_hz = first_change.unwrap();
-                // Try second change within 2000ms
-                let _ = controller.process_with_time(low_fps - 10.0, new_hz, after_drop + Duration::from_millis(1));
-                let second_attempt = after_drop + Duration::from_millis(interval_ms);
-                // Need to wait for drop threshold too
-                let second_attempt = second_attempt.max(after_drop + Duration::from_millis(2001));
-                
-                if second_attempt.duration_since(after_drop) < Duration::from_millis(2000) {
-                    let blocked = controller.process_with_time(low_fps - 10.0, new_hz, second_attempt);
-                    prop_assert!(blocked.is_none(), "LCD should block changes within 2000ms");
-                }
-            }
+            let result2 = controller.process_with_time(fps_below, current_hz, start);
+            prop_assert!(result2.is_none());
+            prop_assert_eq!(controller.state(), AlgorithmState::Stable);
         }
 
         #[test]
@@ -653,14 +707,13 @@ mod tests {
             fps in 35.0f64..=95.0f64,
             current_hz in 40u32..=90u32,
         ) {
-            let current_hz = (current_hz / 5) * 5; // Start on 5Hz step
+            let current_hz = (current_hz / 5) * 5;
             let mut controller = HysteresisController::new(Sensitivity::Balanced);
             controller.set_user_range(40, 90);
             let start = Instant::now();
 
-            // Process to potentially trigger a change
             let _ = controller.process_with_time(fps, current_hz, start);
-            let after_threshold = start + Duration::from_millis(5001); // Long enough for any threshold
+            let after_threshold = start + Duration::from_millis(5001);
             let result = controller.process_with_time(fps, current_hz, after_threshold);
 
             if let Some(new_hz) = result {

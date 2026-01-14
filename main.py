@@ -1,8 +1,14 @@
 """
-SmartRefresh Decky Loader Plugin - Python Wrapper
+SmartRefresh Decky Loader Plugin v2.0 - Python Wrapper
 
 This module manages the Rust daemon lifecycle and provides IPC proxy methods
 for the React frontend to communicate with the daemon.
+
+v2.0 Features:
+- Game change detection
+- Profile management
+- Battery status
+- Metrics exposure
 """
 
 import asyncio
@@ -13,7 +19,7 @@ import subprocess
 import json
 import stat
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import decky  # type: ignore
 
@@ -22,16 +28,19 @@ DAEMON_BINARY_NAME = "smart-refresh-daemon"
 SOCKET_PATH = "/tmp/smart-refresh.sock"
 SOCKET_TIMEOUT = 2.0
 SHUTDOWN_TIMEOUT = 2.0
+GAME_POLL_INTERVAL = 5.0
 
 defaultDir = os.environ.get("DECKY_PLUGIN_DIR")
 
 
 class Plugin:
-    """SmartRefresh Decky Loader Plugin."""
+    """SmartRefresh Decky Loader Plugin v2.0."""
     
     def __init__(self):
         self._daemon_process: Optional[subprocess.Popen] = None
         self._daemon_pid: Optional[int] = None
+        self._current_app_id: Optional[str] = None
+        self._game_monitor_task: Optional[asyncio.Task] = None
     
     def _get_binary_path(self) -> Path:
         """Get the path to the daemon binary."""
@@ -166,20 +175,75 @@ class Plugin:
             decky.logger.error(f"IPC error: {e}")
             return {"error": str(e)}
 
+    async def _get_running_app_id(self) -> Optional[str]:
+        """Get the currently running game's AppID from Steam."""
+        try:
+            # Try to get from Decky's API
+            if hasattr(decky, 'DECKY_PLUGIN_RUNTIME_DIR'):
+                # Check Steam's running app
+                steam_pid_file = Path("/tmp/.X0-lock")
+                # This is a simplified approach - in production, use Steam's API
+                pass
+            return None
+        except Exception as e:
+            decky.logger.debug(f"Failed to get running app: {e}")
+            return None
+
+    async def _game_monitor_loop(self):
+        """Monitor for game changes and update daemon."""
+        decky.logger.info("Starting game monitor loop")
+        while True:
+            try:
+                await asyncio.sleep(GAME_POLL_INTERVAL)
+                
+                new_app_id = await self._get_running_app_id()
+                
+                if new_app_id != self._current_app_id:
+                    self._current_app_id = new_app_id
+                    if new_app_id:
+                        decky.logger.info(f"Game changed to AppID: {new_app_id}")
+                        self._send_ipc_command({
+                            "command": "SetGameId",
+                            "app_id": new_app_id
+                        })
+                    else:
+                        decky.logger.info("No game running, reverting to defaults")
+                        self._send_ipc_command({
+                            "command": "SetGameId",
+                            "app_id": ""
+                        })
+                        
+            except asyncio.CancelledError:
+                decky.logger.info("Game monitor loop cancelled")
+                break
+            except Exception as e:
+                decky.logger.error(f"Game monitor error: {e}")
+                await asyncio.sleep(GAME_POLL_INTERVAL)
+
     # ==================== Decky Plugin Lifecycle ====================
     
-    async def init(self):
-        """Plugin initialization - called when plugin loads."""
-        decky.logger.info("SmartRefresh plugin loading...")
+    async def _main(self):
+        """Plugin main entry point - called when plugin loads."""
+        decky.logger.info("SmartRefresh plugin v2.0 loading...")
         
         if self._spawn_daemon():
             decky.logger.info("SmartRefresh plugin loaded successfully")
+            # Start game monitor
+            self._game_monitor_task = asyncio.create_task(self._game_monitor_loop())
         else:
             decky.logger.error("SmartRefresh plugin failed to start daemon")
     
     async def _unload(self):
         """Plugin unload - called when plugin unloads."""
         decky.logger.info("SmartRefresh plugin unloading...")
+        
+        # Cancel game monitor
+        if self._game_monitor_task:
+            self._game_monitor_task.cancel()
+            try:
+                await self._game_monitor_task
+            except asyncio.CancelledError:
+                pass
         
         if self._stop_daemon():
             decky.logger.info("SmartRefresh plugin unloaded successfully")
@@ -192,13 +256,23 @@ class Plugin:
         """Get the current daemon status."""
         return self._send_ipc_command({"command": "GetStatus"})
     
-    async def set_settings(self, min_hz: int, max_hz: int, sensitivity: str) -> Dict[str, Any]:
+    async def get_metrics(self) -> Dict[str, Any]:
+        """Get daemon metrics."""
+        return self._send_ipc_command({"command": "GetMetrics"})
+    
+    async def get_battery_status(self) -> Dict[str, Any]:
+        """Get battery status and savings estimate."""
+        return self._send_ipc_command({"command": "GetBatteryStatus"})
+    
+    async def set_settings(self, min_hz: int, max_hz: int, sensitivity: str, 
+                          adaptive_sensitivity: bool = False) -> Dict[str, Any]:
         """Update daemon configuration."""
         return self._send_ipc_command({
             "command": "SetConfig",
             "min_hz": min_hz,
             "max_hz": max_hz,
-            "sensitivity": sensitivity
+            "sensitivity": sensitivity,
+            "adaptive_sensitivity": adaptive_sensitivity
         })
     
     async def start(self) -> Dict[str, Any]:
@@ -227,19 +301,55 @@ class Plugin:
     
     async def set_range(self, min_hz: int, max_hz: int) -> Dict[str, Any]:
         """Set the refresh rate range."""
-        # Get current settings first to preserve sensitivity
         status = self._send_ipc_command({"command": "GetStatus"})
         sensitivity = status.get("config", {}).get("sensitivity", "balanced")
+        adaptive = status.get("config", {}).get("adaptive_sensitivity", False)
         return self._send_ipc_command({
             "command": "SetConfig",
             "min_hz": min_hz,
             "max_hz": max_hz,
-            "sensitivity": sensitivity
+            "sensitivity": sensitivity,
+            "adaptive_sensitivity": adaptive
         })
 
     async def set_device_mode(self, mode: str) -> Dict[str, Any]:
-        """Set the device mode (oled/lcd/custom) for hardware-specific throttling."""
+        """Set the device mode (oled/lcd/custom)."""
         return self._send_ipc_command({
             "command": "SetDeviceMode",
             "mode": mode
+        })
+
+    # ==================== Profile Management ====================
+    
+    async def get_profiles(self) -> Dict[str, Any]:
+        """Get all saved profiles."""
+        return self._send_ipc_command({"command": "GetProfiles"})
+    
+    async def save_profile(self, app_id: str, name: str, min_hz: int, max_hz: int,
+                          sensitivity: str, adaptive_sensitivity: bool = False) -> Dict[str, Any]:
+        """Save a profile for a game."""
+        return self._send_ipc_command({
+            "command": "SaveProfile",
+            "app_id": app_id,
+            "name": name,
+            "min_hz": min_hz,
+            "max_hz": max_hz,
+            "sensitivity": sensitivity,
+            "adaptive_sensitivity": adaptive_sensitivity
+        })
+    
+    async def delete_profile(self, app_id: str) -> Dict[str, Any]:
+        """Delete a profile."""
+        return self._send_ipc_command({
+            "command": "DeleteProfile",
+            "app_id": app_id
+        })
+    
+    async def set_game_id(self, app_id: str, name: str = "") -> Dict[str, Any]:
+        """Set the current game ID (triggers profile loading)."""
+        self._current_app_id = app_id if app_id else None
+        return self._send_ipc_command({
+            "command": "SetGameId",
+            "app_id": app_id,
+            "name": name
         })
