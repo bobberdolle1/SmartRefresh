@@ -4,7 +4,7 @@
 //! commands from the Decky frontend and sending status responses.
 
 use crate::config::{Config, ConfigManager};
-use crate::core_logic::{AlgorithmState, HysteresisController, Sensitivity};
+use crate::core_logic::{AlgorithmState, DeviceMode, HysteresisController, Sensitivity};
 use crate::error::IpcError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -30,6 +30,9 @@ pub enum IpcCommand {
         min_hz: u32,
         max_hz: u32,
         sensitivity: String,
+    },
+    SetDeviceMode {
+        mode: String,
     },
     GetStatus,
 }
@@ -62,6 +65,7 @@ pub struct StatusResponse {
     pub current_fps: f64,
     pub current_hz: u32,
     pub state: String,
+    pub device_mode: String,
     pub config: ConfigResponse,
 }
 
@@ -77,9 +81,13 @@ impl StatusResponse {
         let valid_sensitivities = ["conservative", "balanced", "aggressive"];
         let sensitivity_valid = valid_sensitivities.contains(&self.config.sensitivity.as_str());
         
+        // Check that device_mode is valid
+        let valid_modes = ["oled", "lcd", "custom"];
+        let mode_valid = valid_modes.contains(&self.device_mode.as_str());
+        
         // current_fps and current_hz are always present as they're required fields
         // running and enabled are booleans, always valid
-        state_valid && sensitivity_valid
+        state_valid && sensitivity_valid && mode_valid
     }
 }
 
@@ -102,6 +110,28 @@ pub fn parse_sensitivity(s: &str) -> Result<Sensitivity, IpcError> {
             "Invalid sensitivity '{}', expected one of: conservative, balanced, aggressive",
             s
         ))),
+    }
+}
+
+/// Parse device mode string to enum.
+pub fn parse_device_mode(s: &str) -> Result<DeviceMode, IpcError> {
+    match s.to_lowercase().as_str() {
+        "oled" => Ok(DeviceMode::Oled),
+        "lcd" => Ok(DeviceMode::Lcd),
+        "custom" => Ok(DeviceMode::Custom),
+        _ => Err(IpcError::InvalidCommand(format!(
+            "Invalid device mode '{}', expected one of: oled, lcd, custom",
+            s
+        ))),
+    }
+}
+
+/// Convert DeviceMode enum to string.
+pub fn device_mode_to_string(mode: DeviceMode) -> String {
+    match mode {
+        DeviceMode::Oled => "oled".to_string(),
+        DeviceMode::Lcd => "lcd".to_string(),
+        DeviceMode::Custom => "custom".to_string(),
     }
 }
 
@@ -153,6 +183,7 @@ impl DaemonState {
             current_fps,
             current_hz: self.current_hz.load(Ordering::SeqCst),
             state: algorithm_state_to_string(controller.state()),
+            device_mode: device_mode_to_string(controller.device_mode()),
             config: ConfigResponse::from(&config),
         }
     }
@@ -352,6 +383,35 @@ impl IpcServer {
                 }
             }
 
+            IpcCommand::SetDeviceMode { mode } => {
+                // Parse device mode
+                let mode_enum = match parse_device_mode(&mode) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return serde_json::json!({
+                            "success": false,
+                            "error": e.to_string()
+                        });
+                    }
+                };
+
+                // Apply mode constraints to controller
+                let mut controller = state.controller.write().await;
+                controller.apply_mode_constraints(mode_enum);
+                
+                tracing::info!(
+                    "Device mode set via IPC: mode={}, min_change_interval={}ms",
+                    mode,
+                    if mode_enum == DeviceMode::Lcd { 2000 } else { 500 }
+                );
+                
+                serde_json::json!({
+                    "success": true,
+                    "message": format!("Device mode set to {}", mode),
+                    "mode": mode
+                })
+            }
+
             IpcCommand::GetStatus => {
                 let status = state.get_status().await;
                 serde_json::to_value(status).unwrap_or_else(|e| {
@@ -436,6 +496,7 @@ mod tests {
             current_fps: 58.5,
             current_hz: 60,
             state: "Stable".to_string(),
+            device_mode: "oled".to_string(),
             config: ConfigResponse {
                 min_hz: 40,
                 max_hz: 90,
@@ -449,6 +510,7 @@ mod tests {
         assert!(json.contains("\"current_fps\":58.5"));
         assert!(json.contains("\"current_hz\":60"));
         assert!(json.contains("\"state\":\"Stable\""));
+        assert!(json.contains("\"device_mode\":\"oled\""));
 
         let parsed: StatusResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, response);
@@ -461,6 +523,7 @@ mod tests {
             current_fps: 60.0,
             current_hz: 60,
             state: "Stable".to_string(),
+            device_mode: "oled".to_string(),
             config: ConfigResponse {
                 min_hz: 40,
                 max_hz: 90,
@@ -486,6 +549,13 @@ mod tests {
             ..valid_response.clone()
         };
         assert!(!invalid_sensitivity.is_complete());
+
+        // Invalid device mode
+        let invalid_mode = StatusResponse {
+            device_mode: "invalid".to_string(),
+            ..valid_response.clone()
+        };
+        assert!(!invalid_mode.is_complete());
     }
 
     #[test]
@@ -607,6 +677,7 @@ mod tests {
         assert_eq!(status.current_fps, 0.0);
         assert_eq!(status.current_hz, 90); // max_hz from default config
         assert_eq!(status.state, "Stable");
+        assert_eq!(status.device_mode, "oled"); // default device mode
         assert_eq!(status.config.min_hz, 40);
         assert_eq!(status.config.max_hz, 90);
         assert_eq!(status.config.sensitivity, "balanced");
@@ -713,6 +784,7 @@ mod tests {
         assert!(response["current_fps"].is_number());
         assert!(response["current_hz"].is_number());
         assert!(response["state"].is_string());
+        assert!(response["device_mode"].is_string());
         assert!(response["config"].is_object());
         assert!(response["config"]["min_hz"].is_number());
         assert!(response["config"]["max_hz"].is_number());
@@ -738,12 +810,21 @@ mod tests {
         ]
     }
 
+    // Strategy to generate valid device mode strings
+    fn device_mode_string_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("oled".to_string()),
+            Just("lcd".to_string()),
+            Just("custom".to_string()),
+        ]
+    }
+
     // **Feature: smart-refresh-daemon, Property 8: Status Response Completeness**
     // **Validates: Requirements 5.5**
     //
     // For any daemon state, the status response JSON should contain all required fields:
     // running (boolean), current_fps (number), current_hz (number), state (string),
-    // and config (object with min_hz, max_hz, sensitivity, enabled).
+    // device_mode (string), and config (object with min_hz, max_hz, sensitivity, enabled).
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(100))]
 
@@ -753,6 +834,7 @@ mod tests {
             current_fps in 0.0f64..=200.0f64,
             current_hz in 40u32..=90u32,
             state in state_string_strategy(),
+            device_mode in device_mode_string_strategy(),
             min_hz in 40u32..=90u32,
             max_hz in 40u32..=90u32,
             sensitivity in sensitivity_string_strategy(),
@@ -770,6 +852,7 @@ mod tests {
                 current_fps,
                 current_hz,
                 state: state.clone(),
+                device_mode: device_mode.clone(),
                 config: ConfigResponse {
                     min_hz,
                     max_hz,
@@ -787,6 +870,7 @@ mod tests {
             prop_assert!(parsed.get("current_fps").is_some(), "Missing 'current_fps' field");
             prop_assert!(parsed.get("current_hz").is_some(), "Missing 'current_hz' field");
             prop_assert!(parsed.get("state").is_some(), "Missing 'state' field");
+            prop_assert!(parsed.get("device_mode").is_some(), "Missing 'device_mode' field");
             prop_assert!(parsed.get("config").is_some(), "Missing 'config' field");
 
             // Verify config sub-fields
@@ -801,6 +885,7 @@ mod tests {
             prop_assert!(parsed["current_fps"].is_number(), "'current_fps' should be number");
             prop_assert!(parsed["current_hz"].is_number(), "'current_hz' should be number");
             prop_assert!(parsed["state"].is_string(), "'state' should be string");
+            prop_assert!(parsed["device_mode"].is_string(), "'device_mode' should be string");
             prop_assert!(config["min_hz"].is_number(), "'config.min_hz' should be number");
             prop_assert!(config["max_hz"].is_number(), "'config.max_hz' should be number");
             prop_assert!(config["sensitivity"].is_string(), "'config.sensitivity' should be string");
@@ -811,6 +896,7 @@ mod tests {
             prop_assert!((parsed["current_fps"].as_f64().unwrap() - current_fps).abs() < 0.001);
             prop_assert_eq!(parsed["current_hz"].as_u64().unwrap() as u32, current_hz);
             prop_assert_eq!(parsed["state"].as_str().unwrap(), state);
+            prop_assert_eq!(parsed["device_mode"].as_str().unwrap(), device_mode);
             prop_assert_eq!(config["min_hz"].as_u64().unwrap() as u32, min_hz);
             prop_assert_eq!(config["max_hz"].as_u64().unwrap() as u32, max_hz);
             prop_assert_eq!(config["sensitivity"].as_str().unwrap(), sensitivity);
@@ -826,6 +912,7 @@ mod tests {
             current_fps in 0.0f64..=200.0f64,
             current_hz in 40u32..=90u32,
             state in state_string_strategy(),
+            device_mode in device_mode_string_strategy(),
             min_hz in 40u32..=90u32,
             max_hz in 40u32..=90u32,
             sensitivity in sensitivity_string_strategy(),
@@ -842,6 +929,7 @@ mod tests {
                 current_fps,
                 current_hz,
                 state,
+                device_mode,
                 config: ConfigResponse {
                     min_hz,
                     max_hz,
@@ -860,6 +948,7 @@ mod tests {
                 "current_fps mismatch: {} vs {}", original.current_fps, parsed.current_fps);
             prop_assert_eq!(original.current_hz, parsed.current_hz);
             prop_assert_eq!(original.state, parsed.state);
+            prop_assert_eq!(original.device_mode, parsed.device_mode);
             prop_assert_eq!(original.config, parsed.config);
         }
     }

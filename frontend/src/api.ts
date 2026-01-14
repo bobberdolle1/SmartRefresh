@@ -63,3 +63,15 @@ export async function setSettings(
     return false;
   }
 }
+
+export type DeviceMode = "oled" | "lcd" | "custom";
+
+export async function setDeviceMode(mode: DeviceMode): Promise<boolean> {
+  try {
+    await call<[string], void>("set_device_mode", mode);
+    return true;
+  } catch (error) {
+    console.error("SmartRefresh: Failed to set device mode", error);
+    return false;
+  }
+}

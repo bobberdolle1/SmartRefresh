@@ -16,10 +16,12 @@ import {
   startDaemon,
   stopDaemon,
   setSettings,
+  setDeviceMode,
   DaemonStatus,
+  DeviceMode,
 } from "./api";
 
-type DevicePreset = "oled" | "lcd" | "custom";
+type DevicePreset = DeviceMode;
 
 const DEVICE_PRESETS: DropdownOption[] = [
   { data: "oled", label: "Steam Deck OLED" },
@@ -95,11 +97,19 @@ const Content: VFC = () => {
     const newPreset = option.data as DevicePreset;
     setPreset(newPreset);
 
+    // Notify backend of device mode change for LCD throttling
+    await setDeviceMode(newPreset);
+
     if (newPreset !== "custom" && PRESET_VALUES[newPreset]) {
       const { minHz: newMin, maxHz: newMax } = PRESET_VALUES[newPreset];
       setMinHz(newMin);
       setMaxHz(newMax);
-      await setSettings(newMin, newMax, SENSITIVITY_OPTIONS[sensitivityIndex]);
+      // For LCD mode, force conservative sensitivity
+      const newSensitivity = newPreset === "lcd" ? 0 : sensitivityIndex;
+      if (newPreset === "lcd") {
+        setSensitivityIndex(0);
+      }
+      await setSettings(newMin, newMax, SENSITIVITY_OPTIONS[newSensitivity]);
     }
   };
 
@@ -152,14 +162,17 @@ const Content: VFC = () => {
           <PanelSectionRow>
             <div
               style={{
-                color: "#f0a030",
+                color: "#e6a23c",
                 fontSize: "0.85em",
-                padding: "4px 0",
+                padding: "8px 12px",
                 lineHeight: "1.4",
+                backgroundColor: "rgba(230, 162, 60, 0.1)",
+                borderRadius: "4px",
+                border: "1px solid rgba(230, 162, 60, 0.3)",
               }}
             >
-              ⚠️ LCD screens have limited VRR range. Flickering may occur at
-              certain refresh rates.
+              ⚠️ LCD VRR range is limited (40-60 Hz). Refresh rate changes are
+              throttled to prevent flickering.
             </div>
           </PanelSectionRow>
         )}

@@ -34,6 +34,18 @@ pub enum Sensitivity {
     Aggressive,
 }
 
+/// Device mode for hardware-specific throttling.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum DeviceMode {
+    /// OLED: Fast switching, minimal throttling (500ms min interval)
+    #[default]
+    Oled,
+    /// LCD: Slow switching, aggressive throttling (2000ms min interval)
+    Lcd,
+    /// Custom: User-defined settings, no forced constraints
+    Custom,
+}
+
 impl Sensitivity {
     /// Get the drop threshold duration for this sensitivity level.
     pub fn drop_threshold(&self) -> Duration {
@@ -72,11 +84,20 @@ pub struct HysteresisController {
     last_change: Option<Instant>,
     /// Current sensitivity setting
     sensitivity: Sensitivity,
+    /// Current device mode
+    device_mode: DeviceMode,
+    /// LCD mode forced Hz range (min, max)
+    lcd_hz_range: (u32, u32),
 }
 
 impl HysteresisController {
-    /// Minimum interval between rate changes (500ms)
-    const MIN_CHANGE_INTERVAL_MS: u64 = 500;
+    /// Minimum interval between rate changes for OLED (500ms)
+    const MIN_CHANGE_INTERVAL_OLED_MS: u64 = 500;
+    /// Minimum interval between rate changes for LCD (2000ms) - prevents flickering
+    const MIN_CHANGE_INTERVAL_LCD_MS: u64 = 2000;
+    /// LCD forced Hz range
+    const LCD_MIN_HZ: u32 = 40;
+    const LCD_MAX_HZ: u32 = 60;
 
     /// Create a new HysteresisController with the specified sensitivity.
     pub fn new(sensitivity: Sensitivity) -> Self {
@@ -84,9 +105,11 @@ impl HysteresisController {
             state: AlgorithmState::Stable,
             drop_threshold: sensitivity.drop_threshold(),
             increase_threshold: sensitivity.increase_threshold(),
-            min_change_interval: Duration::from_millis(Self::MIN_CHANGE_INTERVAL_MS),
+            min_change_interval: Duration::from_millis(Self::MIN_CHANGE_INTERVAL_OLED_MS),
             last_change: None,
             sensitivity,
+            device_mode: DeviceMode::Oled,
+            lcd_hz_range: (Self::LCD_MIN_HZ, Self::LCD_MAX_HZ),
         }
     }
 
@@ -98,6 +121,11 @@ impl HysteresisController {
     /// Get the current sensitivity setting.
     pub fn sensitivity(&self) -> Sensitivity {
         self.sensitivity
+    }
+
+    /// Get the current device mode.
+    pub fn device_mode(&self) -> DeviceMode {
+        self.device_mode
     }
 
     /// Get the timestamp of the last rate change.
@@ -125,6 +153,56 @@ impl HysteresisController {
         self.increase_threshold = sensitivity.increase_threshold();
         // Reset state when sensitivity changes
         self.state = AlgorithmState::Stable;
+    }
+
+    /// Apply device mode constraints.
+    /// 
+    /// For LCD mode:
+    /// - Forces min_change_interval to 2000ms (prevents flickering)
+    /// - Forces sensitivity to Conservative (slower reactions)
+    /// - Clamps Hz range to 40-60
+    pub fn apply_mode_constraints(&mut self, mode: DeviceMode) {
+        self.device_mode = mode;
+        
+        match mode {
+            DeviceMode::Lcd => {
+                // LCD: Aggressive throttling to prevent flickering
+                self.min_change_interval = Duration::from_millis(Self::MIN_CHANGE_INTERVAL_LCD_MS);
+                // Force conservative sensitivity for LCD
+                self.sensitivity = Sensitivity::Conservative;
+                self.drop_threshold = Sensitivity::Conservative.drop_threshold();
+                self.increase_threshold = Sensitivity::Conservative.increase_threshold();
+            }
+            DeviceMode::Oled => {
+                // OLED: Standard fast switching
+                self.min_change_interval = Duration::from_millis(Self::MIN_CHANGE_INTERVAL_OLED_MS);
+                // Keep current sensitivity for OLED
+            }
+            DeviceMode::Custom => {
+                // Custom: Use OLED timing but allow user sensitivity
+                self.min_change_interval = Duration::from_millis(Self::MIN_CHANGE_INTERVAL_OLED_MS);
+            }
+        }
+        
+        // Reset state when mode changes
+        self.state = AlgorithmState::Stable;
+    }
+
+    /// Clamp Hz value based on device mode constraints.
+    /// For LCD mode, clamps to 40-60 Hz range.
+    pub fn clamp_hz(&self, hz: u32, user_min: u32, user_max: u32) -> u32 {
+        match self.device_mode {
+            DeviceMode::Lcd => {
+                // LCD: Force 40-60 Hz range
+                let effective_min = user_min.max(self.lcd_hz_range.0);
+                let effective_max = user_max.min(self.lcd_hz_range.1);
+                hz.clamp(effective_min, effective_max)
+            }
+            _ => {
+                // OLED/Custom: Use user-defined range
+                hz.clamp(user_min, user_max)
+            }
+        }
     }
 
 

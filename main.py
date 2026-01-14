@@ -236,3 +236,10 @@ class Plugin:
             "max_hz": max_hz,
             "sensitivity": sensitivity
         })
+
+    async def set_device_mode(self, mode: str) -> Dict[str, Any]:
+        """Set the device mode (oled/lcd/custom) for hardware-specific throttling."""
+        return self._send_ipc_command({
+            "command": "SetDeviceMode",
+            "mode": mode
+        })

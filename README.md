@@ -11,7 +11,24 @@ SmartRefresh automatically adjusts your display refresh rate based on real-time 
 - **Real-time FPS monitoring** via MangoHud shared memory
 - **Hysteresis algorithm** prevents rapid refresh rate oscillation
 - **Three sensitivity presets**: Conservative, Balanced, Aggressive
-- **Configurable range**: 40-90Hz
+- **Configurable range**: 40-90Hz (OLED) / 40-60Hz (LCD)
+- **LCD Compatibility Mode**: Hardware-specific throttling to prevent screen flickering
+
+## Device Support
+
+| Device | Refresh Range | Min Change Interval | Notes |
+|--------|---------------|---------------------|-------|
+| Steam Deck OLED | 45-90 Hz | 500ms | Full VRR-like experience |
+| Steam Deck LCD | 40-60 Hz | 2000ms | Throttled to prevent flickering |
+
+### LCD Compatibility Mode
+
+Steam Deck LCD displays require longer stabilization periods when switching refresh rates. Rapid switching can cause visible brightness flickering and gamma shifting. LCD mode automatically:
+
+- Limits refresh range to 40-60 Hz
+- Increases minimum change interval to 2 seconds
+- Forces Conservative sensitivity preset
+- Dampens reactions to micro-stutters
 
 ## Requirements
 
@@ -30,22 +47,24 @@ SmartRefresh automatically adjusts your display refresh rate based on real-time 
 1. Open Quick Access Menu (... button)
 2. Go to Decky tab
 3. Find SmartRefresh
-4. Toggle ON to enable
-5. Adjust refresh rate range and sensitivity as needed
+4. **Select your device type** (OLED or LCD)
+5. Toggle ON to enable
+6. Adjust refresh rate range and sensitivity as needed
 
 ## Settings
 
 | Setting | Description |
 |---------|-------------|
+| Device Preset | Select Steam Deck OLED, LCD, or Custom |
 | Enable | Start/stop dynamic refresh rate control |
-| Refresh Range | Min and max Hz (40-90) |
+| Refresh Range | Min and max Hz |
 | Sensitivity | How quickly it reacts to FPS changes |
 
 ### Sensitivity Presets
 
-- **Conservative**: 2s drop / 5s increase — stable, less reactive
-- **Balanced**: 1s drop / 3s increase — default
-- **Aggressive**: 500ms drop / 1.5s increase — fast reactions
+- **Conservative**: 2s drop / 5s increase — stable, less reactive (forced for LCD)
+- **Balanced**: 1s drop / 3s increase — default for OLED
+- **Aggressive**: 500ms drop / 1.5s increase — fast reactions (OLED only)
 
 ## Building from Source
 
