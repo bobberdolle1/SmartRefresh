@@ -7,6 +7,7 @@ use crate::config::{Config, ConfigManager};
 use crate::core_logic::{AlgorithmState, DeviceMode, HysteresisController, Sensitivity};
 use crate::error::IpcError;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -163,11 +164,13 @@ impl DaemonState {
     /// Create a new daemon state with the given config manager.
     pub fn new(config_manager: Arc<ConfigManager>) -> Self {
         let config = config_manager.get();
+        let mut controller = HysteresisController::new(config.sensitivity);
+        controller.set_user_range(config.min_hz, config.max_hz);
         Self {
             running: AtomicBool::new(config.enabled),
             current_fps: RwLock::new(0.0),
             current_hz: AtomicU32::new(config.max_hz),
-            controller: RwLock::new(HysteresisController::new(config.sensitivity)),
+            controller: RwLock::new(controller),
             config_manager,
         }
     }
@@ -362,8 +365,9 @@ impl IpcServer {
                 // Update and persist
                 match state.config_manager.update(config) {
                     Ok(()) => {
-                        // Update controller sensitivity
+                        // Update controller sensitivity and user range
                         let mut controller = state.controller.write().await;
+                        controller.set_user_range(min_hz, max_hz);
                         controller.set_sensitivity(sensitivity_enum);
                         tracing::info!(
                             "Config updated via IPC: min_hz={}, max_hz={}, sensitivity={}",
@@ -399,16 +403,22 @@ impl IpcServer {
                 let mut controller = state.controller.write().await;
                 controller.apply_mode_constraints(mode_enum);
                 
+                let effective_sens = sensitivity_to_string(controller.effective_sensitivity());
+                let min_interval = if mode_enum == DeviceMode::Lcd { 2000 } else { 500 };
+                
                 tracing::info!(
-                    "Device mode set via IPC: mode={}, min_change_interval={}ms",
+                    "Device mode set via IPC: mode={}, min_change_interval={}ms, effective_sensitivity={}",
                     mode,
-                    if mode_enum == DeviceMode::Lcd { 2000 } else { 500 }
+                    min_interval,
+                    effective_sens
                 );
                 
                 serde_json::json!({
                     "success": true,
                     "message": format!("Device mode set to {}", mode),
-                    "mode": mode
+                    "mode": mode,
+                    "effective_sensitivity": effective_sens,
+                    "min_change_interval_ms": min_interval
                 })
             }
 

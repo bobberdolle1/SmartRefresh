@@ -12,6 +12,7 @@ export interface DaemonStatus {
   current_fps: number;
   current_hz: number;
   state: string;
+  device_mode: string;
   config: DaemonConfig;
 }
 

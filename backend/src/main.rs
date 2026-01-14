@@ -16,7 +16,9 @@ mod logging;
 use config::ConfigManager;
 use display_control::DisplayManager;
 use fps_monitor::MangoHudReader;
-use ipc_server::{DaemonState, IpcServer};
+use ipc_server::DaemonState;
+#[cfg(unix)]
+use ipc_server::IpcServer;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
