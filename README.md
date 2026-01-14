@@ -38,9 +38,22 @@ Steam Deck LCD displays require longer stabilization periods when switching refr
 
 ## Installation
 
-1. Download the latest `smart-refresh.zip` from Releases
-2. Extract to `~/homebrew/plugins/`
-3. Restart Decky Loader or reboot
+### Quick Install (Recommended)
+
+Run the following in terminal on your Steam Deck:
+
+```bash
+curl -L https://github.com/bobberdolle1/SmartRefresh/raw/master/install.sh | sh
+```
+
+After running the script, you can find the plugin in the Decky Loader plugin list.
+
+### Manual Install
+
+1. Download the latest release from the [Releases](https://github.com/bobberdolle1/SmartRefresh/releases) page
+2. Transfer the downloaded archive to your Steam Deck
+3. In Decky Loader settings, enable **Developer Mode**
+4. Use "Install Plugin from ZIP" to install the plugin
 
 ## Usage
 
