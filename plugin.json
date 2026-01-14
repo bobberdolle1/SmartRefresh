@@ -1,12 +1,12 @@
 {
   "name": "SmartRefresh",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": "SmartRefresh Team",
   "flags": ["root"],
   "api_version": 1,
   "publish": {
     "tags": ["utility", "performance", "display", "battery", "vrr"],
-    "description": "Dynamic refresh rate switching (Software VRR) with per-game profiles, battery tracking, and adaptive sensitivity",
+    "description": "Dynamic refresh rate switching (Software VRR) with per-game profiles, battery tracking, adaptive sensitivity, and frame limiter sync",
     "image": "https://raw.githubusercontent.com/your-username/smart-refresh/main/assets/icon.png"
   }
 }

@@ -47,9 +47,18 @@ pub enum IpcCommand {
         sensitivity: String,
         #[serde(default)]
         adaptive_sensitivity: Option<bool>,
+        #[serde(default)]
+        fps_tolerance: Option<f64>,
+        #[serde(default)]
+        sync_frame_limiter: Option<bool>,
     },
     SetDeviceMode {
         mode: String,
+    },
+    SetAdvancedConfig {
+        fps_tolerance: Option<f64>,
+        resume_cooldown_secs: Option<u64>,
+        sync_frame_limiter: Option<bool>,
     },
     GetStatus,
     GetMetrics,
@@ -122,6 +131,10 @@ pub struct StatusResponse {
     pub fps_std_dev: f64,
     pub current_app_id: Option<String>,
     pub transitions: Vec<TransitionRecord>,
+    // v2.0.1 advanced fields
+    pub fps_tolerance: f64,
+    pub resume_cooldown_remaining: f64,
+    pub sync_frame_limiter: bool,
 }
 
 /// Convert Sensitivity enum to string.
@@ -275,6 +288,10 @@ impl DaemonState {
             fps_std_dev: controller.get_fps_std_dev(),
             current_app_id: profile_manager.get_current_game().cloned(),
             transitions,
+            // v2.0.1 advanced fields
+            fps_tolerance: controller.fps_tolerance(),
+            resume_cooldown_remaining: controller.resume_cooldown_remaining(),
+            sync_frame_limiter: controller.is_sync_frame_limiter_enabled(),
         }
     }
 
@@ -422,6 +439,8 @@ impl IpcServer {
                 max_hz,
                 sensitivity,
                 adaptive_sensitivity,
+                fps_tolerance,
+                sync_frame_limiter,
             } => {
                 let sensitivity_enum = match parse_sensitivity(&sensitivity) {
                     Ok(s) => s,
@@ -446,6 +465,12 @@ impl IpcServer {
                         if let Some(adaptive) = adaptive_sensitivity {
                             controller.set_adaptive_sensitivity(adaptive);
                         }
+                        if let Some(tolerance) = fps_tolerance {
+                            controller.set_fps_tolerance(tolerance);
+                        }
+                        if let Some(sync_fl) = sync_frame_limiter {
+                            controller.set_sync_frame_limiter(sync_fl);
+                        }
                         tracing::info!(
                             "Config updated via IPC: min_hz={}, max_hz={}, sensitivity={}",
                             min_hz, max_hz, sensitivity
@@ -460,6 +485,36 @@ impl IpcServer {
                         })
                     }
                 }
+            }
+
+            IpcCommand::SetAdvancedConfig {
+                fps_tolerance,
+                resume_cooldown_secs,
+                sync_frame_limiter,
+            } => {
+                let mut controller = state.controller.write().await;
+                
+                if let Some(tolerance) = fps_tolerance {
+                    controller.set_fps_tolerance(tolerance);
+                }
+                if let Some(cooldown) = resume_cooldown_secs {
+                    controller.set_resume_cooldown(cooldown);
+                }
+                if let Some(sync_fl) = sync_frame_limiter {
+                    controller.set_sync_frame_limiter(sync_fl);
+                }
+                
+                tracing::info!(
+                    "Advanced config updated: fps_tolerance={:?}, resume_cooldown={:?}, sync_frame_limiter={:?}",
+                    fps_tolerance, resume_cooldown_secs, sync_frame_limiter
+                );
+                
+                serde_json::json!({
+                    "success": true,
+                    "message": "Advanced configuration updated",
+                    "fps_tolerance": controller.fps_tolerance(),
+                    "sync_frame_limiter": controller.is_sync_frame_limiter_enabled()
+                })
             }
 
             IpcCommand::SetDeviceMode { mode } => {

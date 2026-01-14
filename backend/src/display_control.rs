@@ -1,9 +1,10 @@
 //! Display Control module for managing refresh rate via Gamescope.
 //!
 //! This module handles refresh rate changes through gamescope-cmd execution.
+//! v2.0.1: Added Gamescope frame limiter sync for perfect frame pacing.
 
 use crate::error::DisplayError;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 use tokio::process::Command;
@@ -24,6 +25,10 @@ pub struct DisplayManager {
     max_hz: AtomicU32,
     /// Timestamp of the last refresh rate change.
     last_change: Mutex<Instant>,
+    /// Whether to sync frame limiter with refresh rate
+    sync_frame_limiter: AtomicBool,
+    /// Current frame limiter value
+    current_fps_limit: AtomicU32,
 }
 
 impl DisplayManager {
@@ -48,6 +53,8 @@ impl DisplayManager {
             min_hz: AtomicU32::new(final_min),
             max_hz: AtomicU32::new(final_max),
             last_change: Mutex::new(Instant::now()),
+            sync_frame_limiter: AtomicBool::new(false),
+            current_fps_limit: AtomicU32::new(0), // 0 = no limit
         }
     }
 
@@ -63,6 +70,7 @@ impl DisplayManager {
     /// Set refresh rate via gamescope-cmd.
     ///
     /// Returns Ok(true) if rate was changed, Ok(false) if already at target.
+    /// If sync_frame_limiter is enabled, also sets the FPS limit to match.
     ///
     /// # Arguments
     /// * `hz` - Target refresh rate (will be clamped to configured range)
@@ -75,8 +83,16 @@ impl DisplayManager {
             return Ok(false);
         }
 
-        // Execute gamescope-cmd
+        // Execute gamescope-cmd for refresh rate
         self.execute_gamescope_cmd(clamped_hz).await?;
+
+        // If frame limiter sync is enabled, set FPS limit to match Hz
+        if self.sync_frame_limiter.load(Ordering::Relaxed) {
+            if let Err(e) = self.set_fps_limit(clamped_hz).await {
+                tracing::warn!("Failed to sync frame limiter: {}", e);
+                // Don't fail the whole operation if frame limiter fails
+            }
+        }
 
         // Update current Hz and timestamp
         self.current_hz.store(clamped_hz, Ordering::Relaxed);
@@ -85,6 +101,78 @@ impl DisplayManager {
         }
 
         Ok(true)
+    }
+
+    /// Set Gamescope FPS limit for perfect frame pacing.
+    /// 
+    /// When Hz is set to 45, setting FPS limit to 45 ensures 1:1 frame pacing
+    /// without tearing or stuttering.
+    pub async fn set_fps_limit(&self, fps: u32) -> Result<(), DisplayError> {
+        let output = Command::new("gamescope-cmd")
+            .arg("-F")
+            .arg(fps.to_string())
+            .output()
+            .await
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    DisplayError::CommandNotFound
+                } else {
+                    DisplayError::ExecutionFailed(e)
+                }
+            })?;
+
+        if !output.status.success() {
+            return Err(DisplayError::CommandFailed {
+                exit_code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        self.current_fps_limit.store(fps, Ordering::Relaxed);
+        tracing::debug!("Frame limiter set to {} FPS", fps);
+        Ok(())
+    }
+
+    /// Clear FPS limit (set to 0 / unlimited)
+    pub async fn clear_fps_limit(&self) -> Result<(), DisplayError> {
+        let output = Command::new("gamescope-cmd")
+            .arg("-F")
+            .arg("0")
+            .output()
+            .await
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    DisplayError::CommandNotFound
+                } else {
+                    DisplayError::ExecutionFailed(e)
+                }
+            })?;
+
+        if !output.status.success() {
+            return Err(DisplayError::CommandFailed {
+                exit_code: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+
+        self.current_fps_limit.store(0, Ordering::Relaxed);
+        tracing::debug!("Frame limiter cleared");
+        Ok(())
+    }
+
+    /// Enable or disable frame limiter sync
+    pub fn set_sync_frame_limiter(&self, enabled: bool) {
+        self.sync_frame_limiter.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check if frame limiter sync is enabled
+    pub fn is_sync_frame_limiter_enabled(&self) -> bool {
+        self.sync_frame_limiter.load(Ordering::Relaxed)
+    }
+
+    /// Get current FPS limit (0 = no limit)
+    pub fn get_current_fps_limit(&self) -> u32 {
+        self.current_fps_limit.load(Ordering::Relaxed)
     }
 
     /// Execute the gamescope-cmd command to change refresh rate.

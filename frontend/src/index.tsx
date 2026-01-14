@@ -22,6 +22,7 @@ import {
   getBatteryStatus,
   getProfiles,
   saveProfile,
+  setAdvancedConfig,
   DaemonStatus,
   MetricsResponse,
   BatteryResponse,
@@ -225,6 +226,10 @@ const Content: FC = () => {
   const [battery, setBattery] = useState<BatteryResponse | null>(null);
   const [profiles, setProfiles] = useState<ProfilesResponse | null>(null);
 
+  // v2.0.1 advanced state
+  const [fpsTolerance, setFpsTolerance] = useState(3.0);
+  const [syncFrameLimiter, setSyncFrameLimiter] = useState(false);
+
   // FPS history for sparkline
   const [fpsHistory, setFpsHistory] = useState<FpsHistoryPoint[]>([]);
   const intervalRef = useRef<number | null>(null);
@@ -253,6 +258,10 @@ const Content: FC = () => {
       setPreset(detectPreset(result.config.min_hz, result.config.max_hz));
       setDeviceModel(detectDeviceModel(result.device_mode));
       setAdaptiveSensitivity(result.config.adaptive_sensitivity);
+
+      // v2.0.1 advanced fields
+      setFpsTolerance(result.fps_tolerance);
+      setSyncFrameLimiter(result.sync_frame_limiter);
 
       const sensIndex = SENSITIVITY_OPTIONS.indexOf(result.config.sensitivity);
       setSensitivityIndex(sensIndex >= 0 ? sensIndex : 1);
@@ -370,6 +379,16 @@ const Content: FC = () => {
   const handleAdaptiveSensitivityChange = async (value: boolean) => {
     setAdaptiveSensitivity(value);
     await setSettings(minHz, maxHz, SENSITIVITY_OPTIONS[sensitivityIndex], value);
+  };
+
+  const handleFpsToleranceChange = async (value: number) => {
+    setFpsTolerance(value);
+    await setAdvancedConfig({ fps_tolerance: value });
+  };
+
+  const handleSyncFrameLimiterChange = async (value: boolean) => {
+    setSyncFrameLimiter(value);
+    await setAdvancedConfig({ sync_frame_limiter: value });
   };
 
   const handleSaveProfile = async () => {
@@ -610,6 +629,46 @@ const Content: FC = () => {
                 onChange={handleAdaptiveSensitivityChange}
               />
             </PanelSectionRow>
+
+            <PanelSectionRow>
+              <SliderField
+                label="FPS Tolerance"
+                description={`±${fpsTolerance.toFixed(1)} FPS (sticky target)`}
+                value={fpsTolerance}
+                min={2.0}
+                max={5.0}
+                step={0.5}
+                disabled={loading || !enabled}
+                onChange={handleFpsToleranceChange}
+              />
+            </PanelSectionRow>
+
+            <PanelSectionRow>
+              <ToggleField
+                label="Sync Frame Limiter"
+                description="Set Gamescope FPS limit to match Hz"
+                checked={syncFrameLimiter}
+                disabled={loading || !enabled}
+                onChange={handleSyncFrameLimiterChange}
+              />
+            </PanelSectionRow>
+
+            {status && status.resume_cooldown_remaining > 0 && (
+              <PanelSectionRow>
+                <div
+                  style={{
+                    color: "#60a5fa",
+                    fontSize: "0.85em",
+                    padding: "8px 12px",
+                    backgroundColor: "rgba(96, 165, 250, 0.1)",
+                    borderRadius: "4px",
+                    border: "1px solid rgba(96, 165, 250, 0.3)",
+                  }}
+                >
+                  ⏳ Resume cooldown: {status.resume_cooldown_remaining.toFixed(1)}s
+                </div>
+              </PanelSectionRow>
+            )}
 
             {status && (
               <PanelSectionRow>

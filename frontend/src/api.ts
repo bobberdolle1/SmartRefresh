@@ -28,6 +28,10 @@ export interface DaemonStatus {
   fps_std_dev: number;
   current_app_id: string | null;
   transitions: TransitionRecord[];
+  // v2.0.1 advanced fields
+  fps_tolerance: number;
+  resume_cooldown_remaining: number;
+  sync_frame_limiter: boolean;
 }
 
 export interface MetricsResponse {
@@ -208,6 +212,28 @@ export async function setGameId(appId: string, name: string = ""): Promise<boole
     return true;
   } catch (error) {
     console.error("SmartRefresh: Failed to set game ID", error);
+    return false;
+  }
+}
+
+// Advanced Config (v2.0.1)
+export interface AdvancedConfig {
+  fps_tolerance?: number;
+  resume_cooldown_secs?: number;
+  sync_frame_limiter?: boolean;
+}
+
+export async function setAdvancedConfig(config: AdvancedConfig): Promise<boolean> {
+  try {
+    await call<[number | null, number | null, boolean | null], void>(
+      "set_advanced_config",
+      config.fps_tolerance ?? null,
+      config.resume_cooldown_secs ?? null,
+      config.sync_frame_limiter ?? null
+    );
+    return true;
+  } catch (error) {
+    console.error("SmartRefresh: Failed to set advanced config", error);
     return false;
   }
 }

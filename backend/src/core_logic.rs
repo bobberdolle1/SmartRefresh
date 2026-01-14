@@ -7,13 +7,23 @@
 //! - FPS Jitter Tolerance ("Sticky Target")
 //! - Adaptive Sensitivity based on FPS variance
 //! - Sliding window for FPS sample analysis
+//!
+//! v2.0.1 additions:
+//! - Configurable FPS tolerance (2.0-5.0)
+//! - Resume cooldown (silence period after wake)
+//! - Gamescope frame limiter integration
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// FPS tolerance for "sticky target" - prevents switching when FPS is close to current Hz
-/// This creates a "magnet" effect around the current refresh rate
-pub const FPS_TOLERANCE: f64 = 3.0;
+/// Default FPS tolerance for "sticky target" - prevents switching when FPS is close to current Hz
+pub const DEFAULT_FPS_TOLERANCE: f64 = 3.0;
+
+/// Minimum FPS tolerance (for aggressive users)
+pub const MIN_FPS_TOLERANCE: f64 = 2.0;
+
+/// Maximum FPS tolerance (for stability-focused users)
+pub const MAX_FPS_TOLERANCE: f64 = 5.0;
 
 /// Number of samples for adaptive sensitivity sliding window
 pub const ADAPTIVE_WINDOW_SIZE: usize = 10;
@@ -23,6 +33,9 @@ pub const STD_DEV_STABLE: f64 = 2.0;
 
 /// Standard deviation threshold for unstable FPS (force conservative)
 pub const STD_DEV_UNSTABLE: f64 = 5.0;
+
+/// Default resume cooldown duration (seconds of silence after wake)
+pub const DEFAULT_RESUME_COOLDOWN_SECS: u64 = 5;
 
 /// Algorithm state for hysteresis control.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -180,6 +193,16 @@ pub struct HysteresisController {
     adaptive_sensitivity_enabled: bool,
     /// External display detected - pause processing
     external_display_detected: bool,
+    /// Configurable FPS tolerance (2.0-5.0)
+    fps_tolerance: f64,
+    /// Resume cooldown - timestamp when resume occurred
+    resume_cooldown_until: Option<Instant>,
+    /// Resume cooldown duration
+    resume_cooldown_duration: Duration,
+    /// Whether to sync Gamescope frame limiter with Hz
+    sync_frame_limiter: bool,
+    /// Last Hz that was set (for frame limiter sync)
+    last_set_hz: Option<u32>,
 }
 
 impl HysteresisController {
@@ -207,6 +230,11 @@ impl HysteresisController {
             fps_window: FpsSlidingWindow::default(),
             adaptive_sensitivity_enabled: false,
             external_display_detected: false,
+            fps_tolerance: DEFAULT_FPS_TOLERANCE,
+            resume_cooldown_until: None,
+            resume_cooldown_duration: Duration::from_secs(DEFAULT_RESUME_COOLDOWN_SECS),
+            sync_frame_limiter: false,
+            last_set_hz: None,
         }
     }
 
@@ -280,10 +308,73 @@ impl HysteresisController {
 
     /// Reset state to Stable and clear last_change timestamp
     /// Used after suspend/resume to prevent stale timestamp issues
+    /// Activates resume cooldown period
     pub fn reset_state(&mut self) {
         self.state = AlgorithmState::Stable;
         self.last_change = None;
         self.fps_window.clear();
+        // Activate resume cooldown - no changes for N seconds after wake
+        self.resume_cooldown_until = Some(Instant::now() + self.resume_cooldown_duration);
+        tracing::info!("State reset with {}s resume cooldown", self.resume_cooldown_duration.as_secs());
+    }
+
+    /// Check if currently in resume cooldown period
+    pub fn is_in_resume_cooldown(&self) -> bool {
+        match self.resume_cooldown_until {
+            Some(until) => Instant::now() < until,
+            None => false,
+        }
+    }
+
+    /// Get remaining resume cooldown time in seconds
+    pub fn resume_cooldown_remaining(&self) -> f64 {
+        match self.resume_cooldown_until {
+            Some(until) => {
+                let now = Instant::now();
+                if now < until {
+                    (until - now).as_secs_f64()
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        }
+    }
+
+    /// Set resume cooldown duration
+    pub fn set_resume_cooldown(&mut self, secs: u64) {
+        self.resume_cooldown_duration = Duration::from_secs(secs);
+    }
+
+    /// Get FPS tolerance value
+    pub fn fps_tolerance(&self) -> f64 {
+        self.fps_tolerance
+    }
+
+    /// Set FPS tolerance (clamped to 2.0-5.0 range)
+    pub fn set_fps_tolerance(&mut self, tolerance: f64) {
+        self.fps_tolerance = tolerance.clamp(MIN_FPS_TOLERANCE, MAX_FPS_TOLERANCE);
+        tracing::debug!("FPS tolerance set to {:.1}", self.fps_tolerance);
+    }
+
+    /// Enable/disable Gamescope frame limiter sync
+    pub fn set_sync_frame_limiter(&mut self, enabled: bool) {
+        self.sync_frame_limiter = enabled;
+    }
+
+    /// Check if frame limiter sync is enabled
+    pub fn is_sync_frame_limiter_enabled(&self) -> bool {
+        self.sync_frame_limiter
+    }
+
+    /// Get the last Hz that was set (for frame limiter)
+    pub fn last_set_hz(&self) -> Option<u32> {
+        self.last_set_hz
+    }
+
+    /// Record the Hz that was set
+    pub fn set_last_hz(&mut self, hz: u32) {
+        self.last_set_hz = Some(hz);
     }
 
     /// Check if enough time has passed since the last rate change.
@@ -449,12 +540,20 @@ impl HysteresisController {
             return None;
         }
 
+        // Check resume cooldown - no changes during cooldown period
+        if self.is_in_resume_cooldown() {
+            self.state = AlgorithmState::Stable;
+            tracing::trace!("Resume cooldown active, {:.1}s remaining", self.resume_cooldown_remaining());
+            return None;
+        }
+
         let (effective_min, effective_max) = self.get_effective_range();
         
         // FPS Jitter Tolerance ("Sticky Target")
         // If FPS is within tolerance of current Hz, force stable state
+        // Uses configurable fps_tolerance instead of constant
         let fps_diff = (current_fps - current_hz as f64).abs();
-        if fps_diff < FPS_TOLERANCE {
+        if fps_diff < self.fps_tolerance {
             self.state = AlgorithmState::Stable;
             return None;
         }
@@ -489,6 +588,7 @@ impl HysteresisController {
                         
                         self.state = AlgorithmState::Stable;
                         self.record_change(now);
+                        self.last_set_hz = Some(target_hz);
                         Some(target_hz)
                     } else {
                         None
@@ -516,6 +616,7 @@ impl HysteresisController {
                         
                         self.state = AlgorithmState::Stable;
                         self.record_change(now);
+                        self.last_set_hz = Some(new_hz);
                         Some(new_hz)
                     } else {
                         None
@@ -588,6 +689,67 @@ mod tests {
 
         assert_eq!(controller.state(), AlgorithmState::Stable);
         assert!(controller.last_change().is_none());
+        // Should have resume cooldown active
+        assert!(controller.is_in_resume_cooldown());
+    }
+
+    #[test]
+    fn test_resume_cooldown_blocks_changes() {
+        let mut controller = HysteresisController::new(Sensitivity::Balanced);
+        controller.set_user_range(40, 90);
+        controller.set_resume_cooldown(2); // 2 seconds
+        
+        // Trigger resume cooldown
+        controller.reset_state();
+        
+        let start = Instant::now();
+        
+        // Even with low FPS, should return None during cooldown
+        let result = controller.process_with_time(30.0, 60, start);
+        assert!(result.is_none());
+        assert_eq!(controller.state(), AlgorithmState::Stable);
+        assert!(controller.is_in_resume_cooldown());
+    }
+
+    #[test]
+    fn test_configurable_fps_tolerance() {
+        let mut controller = HysteresisController::new(Sensitivity::Balanced);
+        controller.set_user_range(40, 90);
+        
+        // Default tolerance is 3.0
+        assert_eq!(controller.fps_tolerance(), DEFAULT_FPS_TOLERANCE);
+        
+        // Set to 5.0 (max stability)
+        controller.set_fps_tolerance(5.0);
+        assert_eq!(controller.fps_tolerance(), 5.0);
+        
+        let start = Instant::now();
+        
+        // FPS at 56, Hz at 60 - within tolerance of 5.0 (diff = 4)
+        let result = controller.process_with_time(56.0, 60, start);
+        assert!(result.is_none());
+        assert_eq!(controller.state(), AlgorithmState::Stable);
+        
+        // Set to 2.0 (aggressive)
+        controller.set_fps_tolerance(2.0);
+        
+        // FPS at 56, Hz at 60 - outside tolerance of 2.0 (diff = 4)
+        let result = controller.process_with_time(56.0, 60, start);
+        assert!(result.is_none()); // First sample enters Dropping
+        assert!(matches!(controller.state(), AlgorithmState::Dropping { .. }));
+    }
+
+    #[test]
+    fn test_fps_tolerance_clamping() {
+        let mut controller = HysteresisController::new(Sensitivity::Balanced);
+        
+        // Try to set below minimum
+        controller.set_fps_tolerance(1.0);
+        assert_eq!(controller.fps_tolerance(), MIN_FPS_TOLERANCE);
+        
+        // Try to set above maximum
+        controller.set_fps_tolerance(10.0);
+        assert_eq!(controller.fps_tolerance(), MAX_FPS_TOLERANCE);
     }
 
     #[test]

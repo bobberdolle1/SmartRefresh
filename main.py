@@ -353,3 +353,20 @@ class Plugin:
             "app_id": app_id,
             "name": name
         })
+
+    # ==================== Advanced Config (v2.0.1) ====================
+    
+    async def set_advanced_config(self, fps_tolerance: Optional[float] = None,
+                                  resume_cooldown_secs: Optional[int] = None,
+                                  sync_frame_limiter: Optional[bool] = None) -> Dict[str, Any]:
+        """Set advanced configuration options (v2.0.1)."""
+        command: Dict[str, Any] = {"command": "SetAdvancedConfig"}
+        
+        if fps_tolerance is not None:
+            command["fps_tolerance"] = fps_tolerance
+        if resume_cooldown_secs is not None:
+            command["resume_cooldown_secs"] = resume_cooldown_secs
+        if sync_frame_limiter is not None:
+            command["sync_frame_limiter"] = sync_frame_limiter
+        
+        return self._send_ipc_command(command)
