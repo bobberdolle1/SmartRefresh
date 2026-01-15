@@ -5,7 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_NAME="smart-refresh"
+PLUGIN_NAME="SmartRefresh"
 TARGET="x86_64-unknown-linux-gnu"
 
 echo "=== SmartRefresh Build Script ==="
@@ -91,11 +91,14 @@ PACKAGE_DIR=$(mktemp -d)
 PLUGIN_DIR="$PACKAGE_DIR/$PLUGIN_NAME"
 mkdir -p "$PLUGIN_DIR"
 
-# Copy required files
+# Copy required files (Decky Loader structure)
 cp -r bin "$PLUGIN_DIR/"
-cp -r frontend/dist "$PLUGIN_DIR/"
+mkdir -p "$PLUGIN_DIR/dist"
+cp frontend/dist/index.js "$PLUGIN_DIR/dist/"
 cp main.py "$PLUGIN_DIR/"
 cp plugin.json "$PLUGIN_DIR/"
+cp LICENSE "$PLUGIN_DIR/" 2>/dev/null || true
+cp README.md "$PLUGIN_DIR/" 2>/dev/null || true
 
 # Create ZIP archive
 ZIP_NAME="${PLUGIN_NAME}.zip"
@@ -111,7 +114,14 @@ echo ""
 echo -e "${GREEN}=== Build Complete ===${NC}"
 echo "Output files:"
 echo "  - bin/smart-refresh-daemon"
-echo "  - frontend/dist/"
+echo "  - frontend/dist/index.js"
 echo "  - $ZIP_NAME"
 echo ""
-echo "ZIP archive ready for deployment: $ZIP_NAME"
+echo "ZIP structure:"
+echo "  $PLUGIN_NAME/"
+echo "  ├── bin/smart-refresh-daemon"
+echo "  ├── dist/index.js"
+echo "  ├── main.py"
+echo "  └── plugin.json"
+echo ""
+echo "ZIP archive ready for Decky Loader: $ZIP_NAME"

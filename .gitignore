@@ -25,3 +25,10 @@ Thumbs.db
 
 # Temp
 *.tmp
+
+# Compiled binary (built by build.sh)
+bin/smart-refresh-daemon
+
+# Frontend build output (built by npm run build)
+frontend/dist/
+dist/

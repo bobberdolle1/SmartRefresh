@@ -35,14 +35,14 @@ type DeviceModelType = "oled" | "lcd";
 type PresetType = "oled" | "lcd" | "custom";
 
 // Constants
+// LCD mode is currently not supported due to VRR limitations
 const DEVICE_MODEL_OPTIONS: DropdownOption[] = [
   { data: "oled", label: "Steam Deck OLED" },
-  { data: "lcd", label: "Steam Deck LCD" },
+  { data: "lcd", label: "Steam Deck LCD (Not Supported)" },
 ];
 
 const PRESET_OPTIONS: DropdownOption[] = [
   { data: "oled", label: "OLED Preset (45-90 Hz)" },
-  { data: "lcd", label: "LCD Preset (40-60 Hz)" },
   { data: "custom", label: "Custom" },
 ];
 
@@ -318,17 +318,12 @@ const Content: FC = () => {
 
   const handleDeviceModelChange = async (option: DropdownOption) => {
     const newModel = option.data as DeviceModelType;
+    // LCD mode is not supported - ignore selection
+    if (newModel === "lcd") {
+      return;
+    }
     setDeviceModel(newModel);
     await setDeviceMode(newModel);
-
-    if (newModel === "lcd") {
-      const { minHz: newMin, maxHz: newMax } = PRESET_VALUES.lcd;
-      setMinHz(newMin);
-      setMaxHz(newMax);
-      setPreset("lcd");
-      setSensitivityIndex(0);
-      await setSettings(newMin, newMax, SENSITIVITY_OPTIONS[0], adaptiveSensitivity);
-    }
   };
 
   const handlePresetChange = async (option: DropdownOption) => {
@@ -453,17 +448,18 @@ const Content: FC = () => {
           <PanelSectionRow>
             <div
               style={{
-                color: "#e6a23c",
+                color: "#f87171",
                 fontSize: "0.85em",
                 padding: "8px 12px",
                 lineHeight: "1.4",
-                backgroundColor: "rgba(230, 162, 60, 0.1)",
+                backgroundColor: "rgba(248, 113, 113, 0.1)",
                 borderRadius: "4px",
-                border: "1px solid rgba(230, 162, 60, 0.3)",
+                border: "1px solid rgba(248, 113, 113, 0.3)",
               }}
             >
-              ⚠️ LCD VRR range is limited (40-60 Hz). Refresh rate changes are
-              throttled to prevent flickering.
+              ❌ Steam Deck LCD is not currently supported. VRR on LCD has
+              significant limitations that cause flickering and instability.
+              Please use OLED mode or wait for future updates.
             </div>
           </PanelSectionRow>
         )}
