@@ -63,15 +63,6 @@ SmartRefresh автоматически регулирует частоту об
 
 ## Installation / Установка
 
-### From Decky Store / Из магазина Decky
-
-1. Open Quick Access Menu (... button)
-2. Go to Decky tab → Store
-3. Search for "SmartRefresh"
-4. Click Install
-
-### Manual Install / Ручная установка
-
 1. Download `SmartRefresh.zip` from [Releases](https://github.com/bobberdolle1/SmartRefresh/releases)
 2. Open Decky Loader settings
 3. Enable Developer Mode
